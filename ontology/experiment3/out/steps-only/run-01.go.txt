@@ -1,0 +1,156 @@
+```go
+// domain/application/application.go
+package application
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// ApprovalStep は承認ルートの1段を表す
+type ApprovalStep struct {
+	Approver   string     // 承認者ID
+	ApprovedAt *time.Time // 承認日時（nil = 未承認）
+}
+
+// IsApproved はこのステップが承認済みかを返す
+func (s ApprovalStep) IsApproved() bool {
+	return s.ApprovedAt != nil
+}
+
+// Application は申請を表す集約ルート
+type Application struct {
+	id            string
+	status        Status
+	approvalSteps []ApprovalStep // 承認ルート（先頭から順に承認）
+}
+
+// NewApplication は新しい申請を生成する（下書き状態で開始）
+func NewApplication(id string, approvalSteps []ApprovalStep) (*Application, error) {
+	if id == "" {
+		return nil, errors.New("申請IDは必須です")
+	}
+	if len(approvalSteps) == 0 {
+		return nil, errors.New("承認ルートは1段以上必要です")
+	}
+	steps := make([]ApprovalStep, len(approvalSteps))
+	copy(steps, approvalSteps)
+	return &Application{
+		id:            id,
+		status:        StatusDraft,
+		approvalSteps: steps,
+	}, nil
+}
+
+// Reconstruct はDBなどの永続化層から申請を復元する
+func Reconstruct(id string, status string, approvalSteps []ApprovalStep) (*Application, error) {
+	s, err := NewStatus(status)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, errors.New("申請IDは必須です")
+	}
+	steps := make([]ApprovalStep, len(approvalSteps))
+	copy(steps, approvalSteps)
+	return &Application{
+		id:            id,
+		status:        s,
+		approvalSteps: steps,
+	}, nil
+}
+
+// ID は申請IDを返す
+func (a *Application) ID() string { return a.id }
+
+// Status は現在の状態を返す
+func (a *Application) Status() Status { return a.status }
+
+// ApprovalSteps は承認ルートのコピーを返す
+func (a *Application) ApprovalSteps() []ApprovalStep {
+	steps := make([]ApprovalStep, len(a.approvalSteps))
+	copy(steps, a.approvalSteps)
+	return steps
+}
+
+// CurrentStepIndex は次に承認すべきステップのインデックスを返す。
+// すべて承認済みの場合は len(approvalSteps) を返す。
+func (a *Application) CurrentStepIndex() int {
+	for i, step := range a.approvalSteps {
+		if !step.IsApproved() {
+			return i
+		}
+	}
+	return len(a.approvalSteps)
+}
+
+// Submit は申請を提出する（下書き → 申請中、差戻し → 申請中）
+func (a *Application) Submit() error {
+	if !a.status.CanTransitionTo(StatusSubmitted) {
+		return fmt.Errorf("提出できません: 現在の状態は %q です", a.status)
+	}
+	// 再提出の場合は承認済みステップをリセットする
+	if a.status == StatusRejected {
+		a.resetApprovalSteps()
+	}
+	a.status = StatusSubmitted
+	return nil
+}
+
+// Approve は指定した承認者が現在のステップを承認する。
+// すべてのステップが承認された場合、申請は承認済みになる。
+func (a *Application) Approve(approver string) error {
+	if a.status != StatusSubmitted {
+		return fmt.Errorf("承認できません: 現在の状態は %q です", a.status)
+	}
+	idx := a.CurrentStepIndex()
+	if idx >= len(a.approvalSteps) {
+		return errors.New("承認できません: すでにすべての承認ステップが完了しています")
+	}
+	if a.approvalSteps[idx].Approver != approver {
+		return fmt.Errorf(
+			"承認できません: 現在の承認者は %q ですが、操作者は %q です",
+			a.approvalSteps[idx].Approver, approver,
+		)
+	}
+	now := time.Now()
+	a.approvalSteps[idx].ApprovedAt = &now
+
+	// すべてのステップが承認されたら承認済みへ遷移
+	if a.CurrentStepIndex() >= len(a.approvalSteps) {
+		if !a.status.CanTransitionTo(StatusApproved) {
+			return fmt.Errorf("承認済みへの遷移が許可されていません: 現在の状態は %q です", a.status)
+		}
+		a.status = StatusApproved
+	}
+	return nil
+}
+
+// Reject は指定した承認者が申請を差し戻す。
+// 現在のステップの承認者のみ差し戻しできる。
+func (a *Application) Reject(approver string) error {
+	if !a.status.CanTransitionTo(StatusRejected) {
+		return fmt.Errorf("差し戻しできません: 現在の状態は %q です", a.status)
+	}
+	idx := a.CurrentStepIndex()
+	if idx >= len(a.approvalSteps) {
+		return errors.New("差し戻しできません: すでにすべての承認ステップが完了しています")
+	}
+	if a.approvalSteps[idx].Approver != approver {
+		return fmt.Errorf(
+			"差し戻しできません: 現在の承認者は %q ですが、操作者は %q です",
+			a.approvalSteps[idx].Approver, approver,
+		)
+	}
+	a.status = StatusRejected
+	return nil
+}
+
+// resetApprovalSteps は承認ルートの全ステップをリセットする
+func (a *Application) resetApprovalSteps() {
+	for i := range a.approvalSteps {
+		a.approvalSteps[i].ApprovedAt = nil
+	}
+}
+```

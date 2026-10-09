@@ -1,0 +1,206 @@
+```go
+// domain/application/application.go
+package application
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// StepStatus は承認ステップの状態を表す
+type StepStatus string
+
+const (
+	StepStatusPending  StepStatus = "pending"  // 未承認
+	StepStatusApproved StepStatus = "approved" // 承認済み
+)
+
+// ApprovalStep は承認ルートの1段を表す値オブジェクト
+type ApprovalStep struct {
+	Order    int        // 承認順序(1始まり)
+	Approver string     // 承認者ID
+	Status   StepStatus // 承認状態
+	ApprovedAt *time.Time // 承認日時
+}
+
+// ApprovalRoute は承認ルートを表す値オブジェクト
+type ApprovalRoute struct {
+	steps []ApprovalStep
+}
+
+// NewApprovalRoute は承認者IDのリストから ApprovalRoute を生成する
+func NewApprovalRoute(approvers []string) (ApprovalRoute, error) {
+	if len(approvers) == 0 {
+		return ApprovalRoute{}, errors.New("承認ルートに承認者が1人以上必要です")
+	}
+	steps := make([]ApprovalStep, len(approvers))
+	for i, a := range approvers {
+		if a == "" {
+			return ApprovalRoute{}, fmt.Errorf("承認者ID(%d番目)が空です", i+1)
+		}
+		steps[i] = ApprovalStep{
+			Order:    i + 1,
+			Approver: a,
+			Status:   StepStatusPending,
+		}
+	}
+	return ApprovalRoute{steps: steps}, nil
+}
+
+// Steps は承認ステップの複製を返す
+func (r ApprovalRoute) Steps() []ApprovalStep {
+	copied := make([]ApprovalStep, len(r.steps))
+	copy(copied, r.steps)
+	return copied
+}
+
+// currentStep は現在承認待ちの先頭のステップを返す。
+// 全ステップ承認済みの場合は nil を返す
+func (r *ApprovalRoute) currentStep() *ApprovalStep {
+	for i := range r.steps {
+		if r.steps[i].Status == StepStatusPending {
+			return &r.steps[i]
+		}
+	}
+	return nil
+}
+
+// approveStep は指定承認者による承認を試みる
+func (r *ApprovalRoute) approveStep(approver string) error {
+	step := r.currentStep()
+	if step == nil {
+		return errors.New("承認待ちのステップがありません")
+	}
+	if step.Approver != approver {
+		return fmt.Errorf("現在の承認者は %q ではなく %q です", approver, step.Approver)
+	}
+	now := time.Now()
+	step.Status = StepStatusApproved
+	step.ApprovedAt = &now
+	return nil
+}
+
+// isAllApproved は全ステップが承認済みかを返す
+func (r *ApprovalRoute) isAllApproved() bool {
+	for _, s := range r.steps {
+		if s.Status != StepStatusPending && s.Status == StepStatusPending {
+			return false
+		}
+		if s.Status == StepStatusPending {
+			return false
+		}
+	}
+	return true
+}
+
+// resetApprovals は全ステップを未承認に戻す
+func (r *ApprovalRoute) resetApprovals() {
+	for i := range r.steps {
+		r.steps[i].Status = StepStatusPending
+		r.steps[i].ApprovedAt = nil
+	}
+}
+
+// ApplicationID は申請を識別するID
+type ApplicationID string
+
+// Application は申請を表す集約ルート
+type Application struct {
+	id            ApplicationID
+	status        Status
+	approvalRoute ApprovalRoute
+	createdAt     time.Time
+	updatedAt     time.Time
+}
+
+// NewApplication は新しい申請を下書き状態で生成する
+func NewApplication(id ApplicationID, approvers []string) (*Application, error) {
+	if id == "" {
+		return nil, errors.New("申請IDが空です")
+	}
+	route, err := NewApprovalRoute(approvers)
+	if err != nil {
+		return nil, fmt.Errorf("承認ルートの生成に失敗しました: %w", err)
+	}
+	now := time.Now()
+	return &Application{
+		id:            id,
+		status:        StatusDraft,
+		approvalRoute: route,
+		createdAt:     now,
+		updatedAt:     now,
+	}, nil
+}
+
+// ID は申請IDを返す
+func (a *Application) ID() ApplicationID { return a.id }
+
+// Status は現在の状態を返す
+func (a *Application) Status() Status { return a.status }
+
+// ApprovalRoute は承認ルートを返す
+func (a *Application) ApprovalRoute() ApprovalRoute { return a.approvalRoute }
+
+// CreatedAt は作成日時を返す
+func (a *Application) CreatedAt() time.Time { return a.createdAt }
+
+// UpdatedAt は最終更新日時を返す
+func (a *Application) UpdatedAt() time.Time { return a.updatedAt }
+
+// transitionTo は状態遷移を実行する共通ヘルパー
+func (a *Application) transitionTo(next Status) error {
+	if !a.status.CanTransitionTo(next) {
+		return fmt.Errorf("状態 %q から %q への遷移は許可されていません", a.status, next)
+	}
+	a.status = next
+	a.updatedAt = time.Now()
+	return nil
+}
+
+// Submit は申請を提出する(下書き→申請中、差戻し→申請中)
+func (a *Application) Submit() error {
+	if err := a.transitionTo(StatusSubmitted); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Approve は承認者による承認を行う。
+// 全ステップ承認済みになった場合は申請状態を承認済みに遷移させる
+func (a *Application) Approve(approver string) error {
+	if a.status != StatusSubmitted {
+		return fmt.Errorf("申請中の状態でなければ承認できません(現在: %q)", a.status)
+	}
+	if err := a.approvalRoute.approveStep(approver); err != nil {
+		return fmt.Errorf("承認処理に失敗しました: %w", err)
+	}
+	if a.approvalRoute.isAllApproved() {
+		if err := a.transitionTo(StatusApproved); err != nil {
+			// 遷移に失敗した場合は承認ステップを元に戻す(防衛的実装)
+			return fmt.Errorf("承認済み遷移に失敗しました: %w", err)
+		}
+	} else {
+		a.updatedAt = time.Now()
+	}
+	return nil
+}
+
+// Reject は申請を差し戻す。差戻し時に承認済みステップはリセットされる
+func (a *Application) Reject() error {
+	if a.status != StatusSubmitted {
+		return fmt.Errorf("申請中の状態でなければ差戻しできません(現在: %q)", a.status)
+	}
+	if err := a.transitionTo(StatusRejected); err != nil {
+		return err
+	}
+	// 差戻し状態の申請は承認済みの承認ステップを持たない
+	a.approvalRoute.resetApprovals()
+	return nil
+}
+
+// Resubmit は差戻し後の再提出を行う
+func (a *Application) Resubmit() error {
+	return a.Submit()
+}
+```

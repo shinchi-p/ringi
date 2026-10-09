@@ -1,0 +1,173 @@
+```go
+// domain/application/application.go
+package application
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// StepStatus は承認ステップの状態を表す
+type StepStatus string
+
+const (
+	StepStatusPending  StepStatus = "pending"  // 未承認
+	StepStatusApproved StepStatus = "approved" // 承認済み
+)
+
+// ApprovalStep は承認ルートの1段を表す値オブジェクト
+type ApprovalStep struct {
+	Approver string
+	Status   StepStatus
+}
+
+// Application は申請を表すエンティティ
+type Application struct {
+	id            string
+	status        Status
+	approvalRoute []ApprovalStep
+	createdAt     time.Time
+	updatedAt     time.Time
+}
+
+// NewApplication は新しい申請を生成する（初期状態は下書き）
+func NewApplication(id string, approvers []string) (*Application, error) {
+	if len(approvers) == 0 {
+		return nil, errors.New("承認ルートには少なくとも1人の承認者が必要です")
+	}
+
+	route := make([]ApprovalStep, len(approvers))
+	for i, approver := range approvers {
+		if approver == "" {
+			return nil, fmt.Errorf("承認者の名前が空です（インデックス: %d）", i)
+		}
+		route[i] = ApprovalStep{
+			Approver: approver,
+			Status:   StepStatusPending,
+		}
+	}
+
+	now := time.Now()
+	return &Application{
+		id:            id,
+		status:        StatusDraft,
+		approvalRoute: route,
+		createdAt:     now,
+		updatedAt:     now,
+	}, nil
+}
+
+// Reconstruct はDBなどから申請を復元する
+func Reconstruct(id string, status string, route []ApprovalStep, createdAt, updatedAt time.Time) (*Application, error) {
+	s, err := NewStatus(status)
+	if err != nil {
+		return nil, err
+	}
+	return &Application{
+		id:            id,
+		status:        s,
+		approvalRoute: route,
+		createdAt:     createdAt,
+		updatedAt:     updatedAt,
+	}, nil
+}
+
+// ID は申請IDを返す
+func (a *Application) ID() string { return a.id }
+
+// Status は現在の状態を返す
+func (a *Application) Status() Status { return a.status }
+
+// ApprovalRoute は承認ルートのコピーを返す
+func (a *Application) ApprovalRoute() []ApprovalStep {
+	copied := make([]ApprovalStep, len(a.approvalRoute))
+	copy(copied, a.approvalRoute)
+	return copied
+}
+
+// CreatedAt は作成日時を返す
+func (a *Application) CreatedAt() time.Time { return a.createdAt }
+
+// UpdatedAt は更新日時を返す
+func (a *Application) UpdatedAt() time.Time { return a.updatedAt }
+
+// Submit は申請を提出する（下書き → 申請中、または差戻し → 申請中）
+func (a *Application) Submit() error {
+	if !a.status.CanTransitionTo(StatusSubmitted) {
+		return fmt.Errorf("状態 %q から申請中への遷移は許可されていません", a.status)
+	}
+	a.status = StatusSubmitted
+	a.updatedAt = time.Now()
+	return nil
+}
+
+// Approve は指定された承認者として現在のステップを承認する。
+// すべてのステップが承認されると申請は承認済みになる。
+func (a *Application) Approve(approver string) error {
+	if !a.status.CanTransitionTo(StatusApproved) {
+		// StatusSubmitted からのみ承認操作を受け付ける
+		// CanTransitionTo(StatusApproved) が false になるのは申請中以外の状態
+		return fmt.Errorf("状態 %q では承認操作を行えません", a.status)
+	}
+
+	idx, err := a.currentPendingIndex()
+	if err != nil {
+		return err
+	}
+
+	if a.approvalRoute[idx].Approver != approver {
+		return fmt.Errorf(
+			"順番が異なります。現在の承認者は %q ですが %q が承認しようとしています",
+			a.approvalRoute[idx].Approver, approver,
+		)
+	}
+
+	a.approvalRoute[idx].Status = StepStatusApproved
+	a.updatedAt = time.Now()
+
+	// 全ステップ承認済みなら申請を承認済みへ遷移
+	if a.allStepsApproved() {
+		a.status = StatusApproved
+	}
+
+	return nil
+}
+
+// Reject は申請を差戻す（申請中 → 差戻し）。
+// 差戻し時は承認済みのステップをすべてリセットする。
+func (a *Application) Reject() error {
+	if !a.status.CanTransitionTo(StatusRejected) {
+		return fmt.Errorf("状態 %q から差戻しへの遷移は許可されていません", a.status)
+	}
+
+	// 承認済みのステップをすべて未承認に戻す
+	for i := range a.approvalRoute {
+		a.approvalRoute[i].Status = StepStatusPending
+	}
+
+	a.status = StatusRejected
+	a.updatedAt = time.Now()
+	return nil
+}
+
+// currentPendingIndex は現在承認待ちのステップのインデックスを返す
+func (a *Application) currentPendingIndex() (int, error) {
+	for i, step := range a.approvalRoute {
+		if step.Status == StepStatusPending {
+			return i, nil
+		}
+	}
+	return -1, errors.New("承認待ちのステップがありません")
+}
+
+// allStepsApproved は全ステップが承認済みかどうかを返す
+func (a *Application) allStepsApproved() bool {
+	for _, step := range a.approvalRoute {
+		if step.Status != StepStatusApproved {
+			return false
+		}
+	}
+	return true
+}
+```

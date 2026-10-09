@@ -1,0 +1,174 @@
+```go
+// domain/application/application.go
+package application
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// StepStatus は承認ステップの状態を表す
+type StepStatus string
+
+const (
+	StepStatusPending  StepStatus = "pending"  // 未承認
+	StepStatusApproved StepStatus = "approved" // 承認済み
+)
+
+// ApprovalStep は承認ルートの1段を表す値オブジェクト
+type ApprovalStep struct {
+	Order    int        // 順番(1始まり)
+	Approver string     // 承認者ID
+	Status   StepStatus // ステップの状態
+}
+
+// Application は申請を表す集約ルート
+type Application struct {
+	id            string
+	status        Status
+	approvalSteps []ApprovalStep
+	createdAt     time.Time
+	updatedAt     time.Time
+}
+
+// NewApplication は新規申請を生成する(初期状態は下書き)
+func NewApplication(id string, approvers []string) (*Application, error) {
+	if len(approvers) == 0 {
+		return nil, errors.New("承認者が1人以上必要です")
+	}
+
+	steps := make([]ApprovalStep, len(approvers))
+	for i, approver := range approvers {
+		steps[i] = ApprovalStep{
+			Order:    i + 1,
+			Approver: approver,
+			Status:   StepStatusPending,
+		}
+	}
+
+	now := time.Now()
+	return &Application{
+		id:            id,
+		status:        StatusDraft,
+		approvalSteps: steps,
+		createdAt:     now,
+		updatedAt:     now,
+	}, nil
+}
+
+// Reconstruct はDB等から既存の申請を復元する
+func Reconstruct(
+	id string,
+	status Status,
+	approvalSteps []ApprovalStep,
+	createdAt time.Time,
+	updatedAt time.Time,
+) *Application {
+	return &Application{
+		id:            id,
+		status:        status,
+		approvalSteps: approvalSteps,
+		createdAt:     createdAt,
+		updatedAt:     updatedAt,
+	}
+}
+
+// ID は申請IDを返す
+func (a *Application) ID() string { return a.id }
+
+// Status は現在の状態を返す
+func (a *Application) Status() Status { return a.status }
+
+// ApprovalSteps は承認ステップのコピーを返す
+func (a *Application) ApprovalSteps() []ApprovalStep {
+	copied := make([]ApprovalStep, len(a.approvalSteps))
+	copy(copied, a.approvalSteps)
+	return copied
+}
+
+// CreatedAt は作成日時を返す
+func (a *Application) CreatedAt() time.Time { return a.createdAt }
+
+// UpdatedAt は更新日時を返す
+func (a *Application) UpdatedAt() time.Time { return a.updatedAt }
+
+// Submit は申請を提出する(下書き→申請中、差戻し→申請中)
+func (a *Application) Submit() error {
+	if !a.status.CanTransitionTo(StatusSubmitted) {
+		return fmt.Errorf("提出できません: 現在の状態は %q です", a.status)
+	}
+	a.status = StatusSubmitted
+	a.updatedAt = time.Now()
+	return nil
+}
+
+// Approve は指定した承認者が現在の承認ステップを承認する。
+// すべてのステップが承認されると申請全体が承認済みになる。
+func (a *Application) Approve(approver string) error {
+	if !a.status.CanTransitionTo(StatusApproved) && a.status != StatusSubmitted {
+		return fmt.Errorf("承認できません: 現在の状態は %q です", a.status)
+	}
+	if a.status != StatusSubmitted {
+		return fmt.Errorf("承認できません: 現在の状態は %q です", a.status)
+	}
+
+	step, err := a.currentPendingStep()
+	if err != nil {
+		return err
+	}
+
+	if step.Approver != approver {
+		return fmt.Errorf("承認できません: 現在の承認者は %q ですが、%q が承認しようとしています", step.Approver, approver)
+	}
+
+	a.approvalSteps[step.Order-1].Status = StepStatusApproved
+	a.updatedAt = time.Now()
+
+	if a.allStepsApproved() {
+		if !a.status.CanTransitionTo(StatusApproved) {
+			return fmt.Errorf("承認済みへの遷移が許可されていません: 現在の状態は %q です", a.status)
+		}
+		a.status = StatusApproved
+	}
+
+	return nil
+}
+
+// Reject は申請を差し戻す。承認済みのステップをすべてリセットする。
+func (a *Application) Reject() error {
+	if !a.status.CanTransitionTo(StatusRejected) {
+		return fmt.Errorf("差戻しできません: 現在の状態は %q です", a.status)
+	}
+
+	a.status = StatusRejected
+	a.updatedAt = time.Now()
+
+	// 差戻し時はすべての承認ステップをリセットする
+	for i := range a.approvalSteps {
+		a.approvalSteps[i].Status = StepStatusPending
+	}
+
+	return nil
+}
+
+// currentPendingStep は現在承認待ちのステップを返す
+func (a *Application) currentPendingStep() (*ApprovalStep, error) {
+	for i := range a.approvalSteps {
+		if a.approvalSteps[i].Status == StepStatusPending {
+			return &a.approvalSteps[i], nil
+		}
+	}
+	return nil, errors.New("承認待ちのステップがありません")
+}
+
+// allStepsApproved はすべてのステップが承認済みかを返す
+func (a *Application) allStepsApproved() bool {
+	for _, step := range a.approvalSteps {
+		if step.Status != StepStatusApproved {
+			return false
+		}
+	}
+	return true
+}
+```
