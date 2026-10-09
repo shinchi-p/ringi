@@ -27,6 +27,7 @@ Qiita 連載のコード置き場です。設計判断の背景や解説は記�
 | --- | --- | --- |
 | 第1回 | [差戻された申請は、もう一度出せますか？　AIの答えは「出せない」](https://qiita.com/shinchi-pmtech/items/fea33ad995978944a432) | [ai-01](https://github.com/shinchi-pmtech/ringi/tree/ai-01) |
 | 第2回 | [差戻したら、それまでの承認はどうなりますか？　AIの答えは4対1で割れました](https://qiita.com/shinchi-pmtech/items/e22b7b7a900161ff42a2) | [ai-02](https://github.com/shinchi-pmtech/ringi/tree/ai-02) |
+| 第3回 | [「制約」がAIの判断のブレを抑制する。Goプログラムの生成で実験してみた。](https://qiita.com/shinchi-p/items/84bc4e25ea393be33880) | [ai-03](https://github.com/shinchi-pmtech/ringi/tree/ai-03) |
 
 ## 動かし方
 
